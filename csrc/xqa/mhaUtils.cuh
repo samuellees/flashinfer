@@ -141,7 +141,7 @@ __device__ inline void copyPartialHeadsAsync(
     SrcHead const* const pSrcHead = src + localHeadIdxMap(idxHeadLocal);
     bool const isValidPage = (pSrcHead != nullptr);
     Vec<uint8_t, grainBytesGmem> const* const pSrc =
-        reinterpret_cast<LdGrain const*>(pSrcHead) + idxGrainInsideHead;
+        reinterpret_cast<Vec<uint8_t, grainBytesGmem> const*>(pSrcHead) + idxGrainInsideHead;
     Vec<uint8_t, grainBytesSmem>* const pDst = reinterpret_cast<Vec<uint8_t, grainBytesSmem>*>(
         &dst.template at<swizzle>(dstHeadOffset + idxHeadLocal, segLane));
 #if !ENABLE_4BIT_KV_CACHE

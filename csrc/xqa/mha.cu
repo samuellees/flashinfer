@@ -64,7 +64,9 @@ constexpr uint32_t inputElemsPerGrain = exactDiv(grainBytes, inputElemSize);
 // Each 16 elements (64b) are padded with 64b to match 128b smem grains. Therefore,
 // the grainBytes of GMEM is half of the grainBytes of SMEM.
 constexpr uint32_t grainBytesGmemCache = grainBytes / CacheElemConverter::ElemsPerContainer;
+#if ENABLE_4BIT_KV_CACHE
 constexpr uint32_t grainBytesSf = 4;
+#endif
 
 constexpr bool enableMicroFastPath = false;
 
@@ -952,7 +954,7 @@ using Array2DWTrans = Array2D<T, transpose ? cols : rows, transpose ? rows : col
 // row is contiguous and gemm-K dim.
 // kEx combines with dstCols and mnEx combines with dstRows.
 template <uint32_t kEx, uint32_t mnEx, uint32_t dstRows, uint32_t dstCols, bool transArr2D,
-          bool transInstInMatOuter, bool transInstInMatInner, uint32_t srcRows,
+          bool transInstInMatOuter, bool transInstInMatInner, bool is4BitElem, uint32_t srcRows,
           uint32_t srcCols /*in LdGrain*/>
 __device__ inline Array2DWTrans<InstInMatWTrans<kEx, mnEx, transInstInMatOuter>, dstRows, dstCols,
                                 transArr2D>
@@ -1594,13 +1596,13 @@ CUBIN_EXPORT __global__
     bool const isFullTile = (nbValidHeadTokens == warpTile.y);
     static_assert(nbQBuffers == 1);
     if (isFullTile) {
-      copyHeadsAsync<PaddedInputHead, warpTile.y, ctaShapeInWarps.x, grainBytes, qkSwizzle, true,
-                     warpTile.y>(warpIdx.x, smem.q[warpIdx.y][0], src, nbValidHeadTokens,
-                                 localQHeadTokenIdxMap);
+      copyHeadsAsync<PaddedInputHead, warpTile.y, ctaShapeInWarps.x, grainBytes, grainBytes,
+                     qkSwizzle, true, warpTile.y>(warpIdx.x, smem.q[warpIdx.y][0], src,
+                                                  nbValidHeadTokens, localQHeadTokenIdxMap);
     } else {
-      copyHeadsAsync<PaddedInputHead, warpTile.y, ctaShapeInWarps.x, grainBytes, qkSwizzle, false,
-                     warpTile.y>(warpIdx.x, smem.q[warpIdx.y][0], src, nbValidHeadTokens,
-                                 localQHeadTokenIdxMap);
+      copyHeadsAsync<PaddedInputHead, warpTile.y, ctaShapeInWarps.x, grainBytes, grainBytes,
+                     qkSwizzle, false, warpTile.y>(warpIdx.x, smem.q[warpIdx.y][0], src,
+                                                   nbValidHeadTokens, localQHeadTokenIdxMap);
     }
 
     ldgsts::barArrive(smem.qBarrier[warpIdx.y], true);
@@ -2098,9 +2100,8 @@ CUBIN_EXPORT __global__
               : (seqOffset < cacheSeqLen
                      ? cacheSeqLen - seqOffset
                      : 0U);  // may also be full but it can be handled correctly anyway
-      copyHeadsAsync<PaddedCacheHead, cacheVTileSeqLen, grainBytes, grainBytesGmemCache,
-                     gemm1WarpsPerGrp, grainBytes, grainBytesGmemCache, vSwizzle, false>(
-          warpIdxInGrp, dst, src, nbHeadsAvail);
+      copyHeadsAsync<PaddedCacheHead, cacheVTileSeqLen, gemm1WarpsPerGrp, grainBytes,
+                     grainBytesGmemCache, vSwizzle, false>(warpIdxInGrp, dst, src, nbHeadsAvail);
 #if ENABLE_4BIT_KV_CACHE
       copyHeadsAsync<PaddedCacheHeadSf, cacheVTileSeqLen, gemm1WarpsPerGrp, grainBytesSf,
                      grainBytesSf, false, false>(warpIdxInGrp, dstSf, srcSf, nbHeadsAvail);
