@@ -552,6 +552,70 @@ __device__ inline Vec<uint32_t, nbMat * 2> ldmatrix_16x16_trans(LdGrain const* r
   }
 }
 
+template <uint32_t nbMat>
+__device__ inline Vec<uint32_t, nbMat * 2> ldmatrix_16x16_trans_unpack_4b(LdGrain const* row) {
+#if __CUDA_ARCH__ >= 1000
+  uint32_t a, b, c, d;
+  if constexpr (nbMat == 1) {
+    asm("ldmatrix.sync.aligned.m16n16.x1.trans.shared::cta.b8x16.b4x16_p64 {%0, %1}, [%2];\n"
+        : "=r"(a), "=r"(b)
+        : "l"(__cvta_generic_to_shared(row))
+        : "memory");
+    return Vec<uint32_t, 2>{a, b};
+  } else if constexpr (nbMat == 2) {
+    asm("ldmatrix.sync.aligned.m16n16.x2.trans.shared::cta.b8x16.b4x16_p64 {%0, %1, %2, %3}, "
+        "[%4];\n"
+        : "=r"(a), "=r"(b), "=r"(c), "=r"(d)
+        : "l"(__cvta_generic_to_shared(row))
+        : "memory");
+    return Vec<uint32_t, 4>{a, b, c, d};
+  } else {
+    static_assert(nbMat == 1 || nbMat == 2);
+  }
+#else
+  trap();
+#endif
+}
+
+template <uint32_t nbMat>
+__device__ inline Vec<uint32_t, nbMat> ldmatrix_8x16_4x_unpack_4b(LdGrain const* row) {
+#if __CUDA_ARCH__ >= 1000
+  uint32_t a, b, c, d;
+  if constexpr (nbMat == 4) {
+    asm("ldmatrix.sync.aligned.m8n16.x4.shared.b8x16.b4x16_p64 {%0, %1, %2, %3}, [%4];\n"
+        : "=r"(a), "=r"(b), "=r"(c), "=r"(d)
+        : "l"(__cvta_generic_to_shared(row))
+        : "memory");
+    return Vec<uint32_t, 4>{a, b, c, d};
+  } else if constexpr (nbMat == 2) {
+    asm("ldmatrix.sync.aligned.m8n16.x2.shared.b8x16.b4x16_p64 {%0, %1}, [%2];\n"
+        : "=r"(a), "=r"(b)
+        : "l"(__cvta_generic_to_shared(row))
+        : "memory");
+    return Vec<uint32_t, 2>{a, b};
+  } else if constexpr (nbMat == 1) {
+    asm("ldmatrix.sync.aligned.m8n16.x1.shared.b8x16.b4x16_p64 {%0}, [%1];\n"
+        : "=r"(a)
+        : "l"(__cvta_generic_to_shared(row))
+        : "memory");
+    return Vec<uint32_t, 1>{a};
+  } else {
+    static_assert(nbMat == 1 || nbMat == 2 || nbMat == 4);
+  }
+#else
+  trap();
+#endif
+}
+
+template <bool transpose>
+__device__ inline Vec<uint32_t, 4> ldmatrix_4x_unpack_4b(Warp const& warp, LdGrain const* row) {
+  if constexpr (transpose) {
+    return ldmatrix_16x16_trans_unpack_4b<2>(row);
+  } else {
+    return ldmatrix_8x16_4x_unpack_4b<4>(row);
+  }
+}
+
 template <bool transpose, uint32_t nbMat>
 __device__ inline void stmatrix(LdGrain* row, Vec<uint32_t, nbMat> const& data) {
 #if __CUDA_ARCH__ >= 900
@@ -685,6 +749,49 @@ __device__ inline Vec<uint32_t, 2> convertKCacheWordToF16(uint32_t i8data) {
   for (uint32_t i = 0; i < 4; i++) {
     dst[i] = InputElem(src[i]);
   }
+  return ret;
+}
+
+template <>
+__device__ inline Vec<uint32_t, 2> convertKCacheWordToF16<half, __nv_fp4_e2m1>(uint32_t i8data) {
+  Vec<uint32_t, 2> ret;
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  uint32_t src = i8data | (i8data >> 4);
+  uint32_t(&dst)[2] = reinterpret_cast<uint32_t(&)[2]>(ret);
+  asm("{\n"
+      ".reg .b8 byte0, byte2;\n"
+      "mov.b32 {byte0, _, byte2, _}, %2;\n"
+      "cvt.rn.f16x2.e2m1x2 %0, byte0;\n"
+      "cvt.rn.f16x2.e2m1x2 %1, byte2;\n"
+      "}"
+      : "=r"(dst[0]), "=r"(dst[1])
+      : "r"(src));
+#else
+  trap();
+#endif
+  return ret;
+}
+
+template <>
+__device__ inline Vec<uint32_t, 2> convertKCacheWordToF16<__nv_bfloat16, __nv_fp4_e2m1>(
+    uint32_t i8data) {
+  Vec<uint32_t, 2> ret;
+  // This needs CUDA Toolkit version >= 13.2
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined __CUDACC_VER_MAJOR__) && \
+    (__CUDACC_VER_MAJOR__ >= 13) && (defined __CUDACC_VER_MINOR__) && (__CUDACC_VER_MINOR__ >= 2)
+  uint32_t src = i8data | (i8data >> 4);
+  uint32_t(&dst)[2] = reinterpret_cast<uint32_t(&)[2]>(ret);
+  asm("{\n"
+      ".reg .b8 byte0, byte2;\n"
+      "mov.b32 {byte0, _, byte2, _}, %2;\n"
+      "cvt.rn.bf16x2.e2m1x2 %0, byte0;\n"
+      "cvt.rn.bf16x2.e2m1x2 %1, byte2;\n"
+      "}"
+      : "=r"(dst[0]), "=r"(dst[1])
+      : "r"(src));
+#else
+  trap();
+#endif
   return ret;
 }
 
