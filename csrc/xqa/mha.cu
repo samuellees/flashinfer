@@ -992,7 +992,8 @@ __device__ inline void smemQKPartGemm(Warp const& warp, WarpAcc& acc,
   static_assert(mha::is_same_v<InputElem, half> || mha::is_same_v<InputElem, __nv_bfloat16>,
                 "not implemented");
   static_assert((mha::is_same_v<KElemType, half> || mha::is_same_v<KElemType, __nv_bfloat16> ||
-                 mha::is_same_v<KElemType, int8_t> || mha::is_same_v<KElemType, __nv_fp8_e4m3>),
+                 mha::is_same_v<KElemType, int8_t> || mha::is_same_v<KElemType, __nv_fp8_e4m3> ||
+                 mha::is_same_v<KElemType, __nv_fp4_e2m1>),
                 "not implemented");
   constexpr uint32_t nbInstInMatPerSliceInGemmKDim = 1;
   constexpr uint32_t kElemSize = sizeof(KElemType);
@@ -1035,7 +1036,7 @@ __device__ inline void smemQKPartGemm(Warp const& warp, WarpAcc& acc,
             for (uint32_t i = 0; i < mnExK; i++) {
 #pragma unroll
               for (uint32_t j = 0; j < kExK; j++) {
-                auto const data =
+                auto data =
                     convertKCacheWordToF16<InputElem, KElemType>(kSliceOrig(m, n).data[i][j]);
 #if ENABLE_4BIT_KV_CACHE
                 // Apply scaling factor to the data
@@ -1182,6 +1183,13 @@ __device__ inline void smemXVPartGemm(Warp const& warp, WarpAcc& acc, bool skipX
             auto const& src = vSliceOrig(m, n);
             auto& dst = ret(m, n);
 #if ENABLE_4BIT_KV_CACHE
+            // Src vSlice is InstInMat<mnEx, kEx> , 2x2 regs.
+            // Example elements for T0:
+            // |-----------|-----------|
+            // |  e(0,0:4) |  e(8,0:4) |
+            // |-----------|-----------|
+            // | e(16,0:4) | e(24,0:4) |
+            // |-----------|-----------|
 #pragma unroll
             for (uint32_t i = 0; i < mnEx; i++) {
 #pragma unroll
@@ -2052,6 +2060,9 @@ CUBIN_EXPORT __global__
       assert(seqIter % nbSubSeqPerSeq == seqIterInit % nbSubSeqPerSeq);
       auto const idxNextSMemVBuf = idxCurrSMemVBuf.next();
       auto& dst = getSmemVTile(idxNextSMemVBuf);
+#if ENABLE_4BIT_KV_CACHE
+      auto& dstSf = getSmemVSfTile(idxNextSMemVBuf);
+#endif
       uint32_t const dstHeadOffset = 0;
       constexpr bool vSwizzle = true;
 
@@ -2839,9 +2850,13 @@ void launchMHAFlashInfer(uint32_t multiProcessorCount, uint32_t nbKHeads, uint32
                          float rcpOutScale,
 #endif
                          InputHead const* q, float const* attentionSinks, GMemCacheHead* kCacheVLLM,
-                         GMemCacheHead* vCacheVLLM, KVCachePageIndex const* kvCachePageList,
-                         uint32_t maxSeqLen, uint32_t const* seqLen, uint32_t batchSize,
-                         float kvCacheScale, float const* kvScalePtr,
+                         GMemCacheHead* vCacheVLLM,
+#if ENABLE_4BIT_KV_CACHE
+                         GMemCacheHeadSf* kSfCacheVLLM, GMemCacheHeadSf* vSfCacheVLLM,
+#endif
+                         KVCachePageIndex const* kvCachePageList, uint32_t maxSeqLen,
+                         uint32_t const* seqLen, uint32_t batchSize, float kvCacheScale,
+                         float const* kvScalePtr,
 #if SPEC_DEC
                          uint32_t qSeqLen, uint32_t const* qCuSeqLens, MaskType const* mask,
 #endif
@@ -2864,12 +2879,20 @@ void launchMHAFlashInfer(uint32_t multiProcessorCount, uint32_t nbKHeads, uint32
   dim3 const dimCta{warp_size * ctaShapeInWarps.x, ctaShapeInWarps.y, ctaShapeInWarps.z};
   auto const launchCfg = makeLaunchConfig(dimGrid, dimCta, hostSmemSize, stream, enable_pdl);
   uint32_t const maxNbPagesPerSeq = exactDiv(maxSeqLen, tokensPerPage);
-  KVCacheList<true> const cacheList{kCacheVLLM, vCacheVLLM, kvCachePageList, seqLen,
-                                    maxNbPagesPerSeq};
+  KVCacheList<true> const cacheList{kCacheVLLM,      vCacheVLLM,
+#if ENABLE_4BIT_KV_CACHE
+                                    kSfCacheVLLM,    vSfCacheVLLM,
+#endif
+                                    kvCachePageList, seqLen,       maxNbPagesPerSeq};
   // Convert stride from elements to Heads
-  uint32_t const stride_page_in_heads = static_cast<uint32_t>(kv_stride_page / validElemsPerHead);
-  uint32_t const stride_token_in_heads = static_cast<uint32_t>(kv_stride_token / validElemsPerHead);
-  uint32_t const stride_head_in_heads = static_cast<uint32_t>(kv_stride_head / validElemsPerHead);
+  uint32_t const container_elems_per_head =
+      validElemsPerHead / CacheElemConverter::ElemsPerContainer;
+  uint32_t const stride_page_in_heads =
+      static_cast<uint32_t>(kv_stride_page / container_elems_per_head);
+  uint32_t const stride_token_in_heads =
+      static_cast<uint32_t>(kv_stride_token / container_elems_per_head);
+  uint32_t const stride_head_in_heads =
+      static_cast<uint32_t>(kv_stride_head / container_elems_per_head);
 
   cudaLaunchKernelEx(&launchCfg, kernel_mha,
 #if SPEC_DEC

@@ -149,9 +149,13 @@ void launchMHAFlashInfer(uint32_t multiProcessorCount, uint32_t nbKHeads, uint32
                          float rcpOutScale,
 #endif
                          InputHead const* q, float const* attentionSinks, GMemCacheHead* kCacheVLLM,
-                         GMemCacheHead* vCacheVLLM, KVCachePageIndex const* kvCachePageList,
-                         uint32_t maxSeqLen, uint32_t const* seqLen, uint32_t batchSize,
-                         float kvCacheScale, float const* kvScalePtr,
+                         GMemCacheHead* vCacheVLLM,
+#if ENABLE_4BIT_KV_CACHE
+                         GMemCacheHeadSf* kSfCacheVLLM, GMemCacheHeadSf* vSfCacheVLLM,
+#endif
+                         KVCachePageIndex const* kvCachePageList, uint32_t maxSeqLen,
+                         uint32_t const* seqLen, uint32_t batchSize, float kvCacheScale,
+                         float const* kvScalePtr,
 #if SPEC_DEC
                          uint32_t qSeqLen, uint32_t const* qCuSeqLens, MaskType const* mask,
 #endif

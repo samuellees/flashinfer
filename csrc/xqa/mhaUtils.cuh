@@ -100,11 +100,12 @@ struct HeadPtr<Head, 0, 0> : TinyPtr<Head> {};
 // @fixme: give evict first hint for last part.
 template <typename Head, uint32_t maxNbCopiedHeads, uint32_t nbPartsPerHead,
           uint32_t grainBytesSmem, uint32_t grainBytesGmem, bool swizzle, bool isFull,
-          uint32_t dstNbHeads, typename SrcHeadPtr,
+          uint32_t dstNbHeads, typename SrcHeadPtr, typename _LdGrain,
           typename LocalHeadIdxMap = uint32_t (*)(uint32_t)>
 __device__ inline void copyPartialHeadsAsync(
     Warp const& warp,
-    Array2D<LdGrain, dstNbHeads, exactDiv(exactDiv(sizeof(Head), nbPartsPerHead), grainBytes)>& dst,
+    Array2D<_LdGrain, dstNbHeads, exactDiv(exactDiv(sizeof(Head), nbPartsPerHead), grainBytesSmem)>&
+        dst,
     uint32_t dstHeadOffset, SrcHeadPtr const& src, uint32_t idxPart,
     uint32_t nbAvailHeads = maxNbCopiedHeads,
     LocalHeadIdxMap&& localHeadIdxMap = [](uint32_t x) { return x; }) {
@@ -155,9 +156,9 @@ __device__ inline void copyPartialHeadsAsync(
 
 template <typename Head, uint32_t maxNbCopiedHeads, uint32_t nbWarps, uint32_t grainBytesSmem,
           uint32_t grainBytesGmem, bool swizzle, bool isFull, uint32_t dstNbHeads,
-          typename SrcHeadPtr, typename LocalHeadIdxMap = uint32_t (*)(uint32_t)>
+          typename SrcHeadPtr, typename _LdGrain, typename LocalHeadIdxMap = uint32_t (*)(uint32_t)>
 __device__ inline void copyHeadsAsync(
-    uint32_t idxWarp, Array2D<LdGrain, dstNbHeads, exactDiv(sizeof(Head), grainBytes)>& dst,
+    uint32_t idxWarp, Array2D<_LdGrain, dstNbHeads, exactDiv(sizeof(Head), grainBytesSmem)>& dst,
     SrcHeadPtr const& src, uint32_t nbAvailHeads = maxNbCopiedHeads,
     LocalHeadIdxMap&& localHeadIdxMap = [](uint32_t x) { return x; }) {
   assert(idxWarp < nbWarps);
