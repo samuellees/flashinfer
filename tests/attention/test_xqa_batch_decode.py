@@ -33,10 +33,15 @@ def to_float8(x, dtype=torch.float8_e4m3fn):
 
 
 def to_nvfp4(x):
+    # Get the amax
+    min_val, max_val = x.aminmax()
+    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
+    # The global scale, which is amax / (448. * 6.)
+    global_scale = amax / (448.0 * 6.0)
+    global_scale_inv = 1.0 / global_scale
     # Global sf is 1 for now.
-    global_sf = torch.tensor(1.0, dtype=torch.float32, device=x.device)
-    val, sf = nvfp4_quantize(x, global_sf, sfLayout=SfLayout.layout_linear)
-    return val, sf.reshape(*val.shape[:-1], sf.shape[-1])
+    val, sf = nvfp4_quantize(x, global_scale_inv, sfLayout=SfLayout.layout_linear)
+    return val, sf.reshape(*val.shape[:-1], sf.shape[-1]), global_scale
 
 
 def nvfp4_to_float(x, sf, global_sf):
@@ -142,6 +147,8 @@ def create_kv_cache(
             device=GPU_DEVICE,
         )
 
+    k_global_scale = None
+    v_global_scale = None
     # Convert K and V separately to fp8 if needed
     if kv_dtype == "fp8":
         k_cache, k_scale = to_float8(k_cache / 4.0)
@@ -155,11 +162,10 @@ def create_kv_cache(
             dim=1,
         )
     elif kv_dtype == "nvfp4":
-        k_cache, k_scale = to_nvfp4(k_cache / 4.0)
-        v_cache, v_scale = to_nvfp4(v_cache / 4.0)
-        global_scale_tensor = torch.tensor(1.0, dtype=torch.float32)
-        k_cache_dq = nvfp4_to_float(k_cache, k_scale, global_scale_tensor)
-        v_cache_dq = nvfp4_to_float(v_cache, v_scale, global_scale_tensor)
+        k_cache, k_scale, k_global_scale = to_nvfp4(k_cache / 4.0)
+        v_cache, v_scale, v_global_scale = to_nvfp4(v_cache / 4.0)
+        k_cache_dq = nvfp4_to_float(k_cache, k_scale, k_global_scale)
+        v_cache_dq = nvfp4_to_float(v_cache, v_scale, k_global_scale)
         ref_kv_cache = torch.stack(
             [
                 k_cache_dq.to(ref_kv_dtype_torch),
@@ -173,7 +179,7 @@ def create_kv_cache(
     # Combine K and V into interleaved format for the API
     kv_cache = torch.stack([k_cache, v_cache], dim=1)
 
-    return kv_cache, k_scale, v_scale, ref_kv_cache
+    return kv_cache, k_scale, v_scale, k_global_scale, v_global_scale, ref_kv_cache
 
 
 def create_page_table(batch_size, seq_lens, page_size):
@@ -451,7 +457,7 @@ def test_xqa_batch_decode(
     q_indptr = generate_cumsum_lens(q_lens)
 
     # Create KV cache and related data
-    kv_cache, k_scale, v_scale, ref_kv_cache = create_kv_cache(
+    kv_cache, k_scale, v_scale, _, _, ref_kv_cache = create_kv_cache(
         batch_size,
         seq_lens,
         page_size,
@@ -629,15 +635,17 @@ def test_xqa_batch_decode_nvfp4_kv(
     q_indptr = generate_cumsum_lens(q_lens)
 
     # Create KV cache and related data
-    kv_cache, k_scale, v_scale, ref_kv_cache = create_kv_cache(
-        batch_size,
-        seq_lens,
-        page_size,
-        num_kv_heads,
-        head_dim,
-        kv_dtype,
-        "bf16" if q_dtype == "fp8" else q_dtype,
-        kv_layout,
+    kv_cache, k_scale, v_scale, k_global_scale, v_global_scale, ref_kv_cache = (
+        create_kv_cache(
+            batch_size,
+            seq_lens,
+            page_size,
+            num_kv_heads,
+            head_dim,
+            kv_dtype,
+            "bf16" if q_dtype == "fp8" else q_dtype,
+            kv_layout,
+        )
     )
 
     kv_cache_sf = torch.stack([k_scale, v_scale], dim=1)
@@ -733,8 +741,8 @@ def test_xqa_batch_decode_nvfp4_kv(
         page_table,
         seq_lens.to(GPU_DEVICE),
         torch.max(seq_lens).item(),
-        q_scale * sm_scale,
-        1.0 / o_scale,
+        q_scale * k_global_scale * sm_scale,  # bmm1_scale
+        v_global_scale / o_scale,  # bmm2_scale
         window_left,  # window_left
         out=out,
         enable_pdl=enable_pdl,
