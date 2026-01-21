@@ -622,7 +622,7 @@ def test_xqa_batch_decode_nvfp4_kv(
 
     # Set up test parameters
     torch.manual_seed(0)
-    head_dim = 128
+    head_dim = 256
 
     # Generate random sequence lengths
     num_qo_heads = num_kv_heads * head_grp_size
