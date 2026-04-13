@@ -784,6 +784,12 @@ def cutlass_fused_moe(
             output, output_shape, output_dtype, input.device, "output"
         )
 
+    # Clamp FP8 block scales to prevent NaN from CUTLASS kernel when dead
+    # experts have near-zero scales.  See issue #2595.
+    if use_deepseek_fp8_block_scale and quant_scales:
+        _MIN_BLOCK_SCALE = 1e-10
+        quant_scales = [s.clamp(min=_MIN_BLOCK_SCALE) for s in quant_scales]
+
     return get_cutlass_fused_moe_module(device_arch).cutlass_fused_moe(
         output,
         input,
@@ -2610,6 +2616,15 @@ def trtllm_fp8_block_scale_moe(
         when do_finalize=True, returns the final MoE output.
         otherwise, returns the intermediate results (gemm2_output, expert_weights, expanded_idx_to_permuted_idx) that need further processing.
     """
+    # Clamp block scales to a safe minimum to prevent NaN output from CUTLASS
+    # FP8 kernels.  Extremely small scales (e.g. ~1e-23 from dead/inactive
+    # experts in Qwen3.5-397B-A17B-FP8) cause numerical instability in the
+    # CUTLASS GEMM accumulation path.  See issue #2595.
+    _MIN_FP8_BLOCK_SCALE = 1e-10
+    gemm1_weights_scale = gemm1_weights_scale.clamp(min=_MIN_FP8_BLOCK_SCALE)
+    gemm2_weights_scale = gemm2_weights_scale.clamp(min=_MIN_FP8_BLOCK_SCALE)
+    hidden_states_scale = hidden_states_scale.clamp(min=_MIN_FP8_BLOCK_SCALE)
+
     output = torch.empty(
         hidden_states.shape, dtype=torch.bfloat16, device=hidden_states.device
     )
